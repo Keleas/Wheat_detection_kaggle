@@ -1,9 +1,20 @@
+import sys
+sys.path.insert(0, "src")
+sys.path.insert(0, "timm_effdet")
+sys.path.insert(0, "weightedboxesfusion")
+
+from src.data import DatasetRetriever
+from src.utils import calculate_image_precision
+
+from timm_effdet.effdet import get_efficientdet_config, EfficientDet, DetBenchTrain
+from timm_effdet.effdet.efficientdet import HeadNet
+from weightedboxesfusion.ensemble_boxes import *
+
 import argparse
 import gc
 import json
 import os
 import random
-import sys
 
 import neptune
 import numpy as np
@@ -16,16 +27,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SequentialSampler, RandomSampler
 from tqdm import tqdm
 
-sys.path.insert(0, "src")
-sys.path.insert(0, "timm_effdet")
-sys.path.insert(0, "weightedboxesfusion")
 
-from src.data import DatasetRetriever
-from src.utils import calculate_image_precision
 
-from timm_effdet.effdet import get_efficientdet_config, EfficientDet, DetBenchTrain
-from timm_effdet.effdet.efficientdet import HeadNet
-from weightedboxesfusion.ensemble_boxes import *
 
 mixed_precision = False
 try:  # Mixed precision training https://github.com/NVIDIA/apex
@@ -33,53 +36,6 @@ try:  # Mixed precision training https://github.com/NVIDIA/apex
 except:
     mixed_precision = False  # not installed
 print(f'Apex is {mixed_precision}')
-
-
-class LabelSmoothing(nn.Module):
-    def __init__(self, smoothing=0.1):
-        super(LabelSmoothing, self).__init__()
-        self.confidence = 1.0 - smoothing
-        self.smoothing = smoothing
-
-    def forward(self, x, target):
-        if self.training:
-            x = x.float()
-            target = target.float()
-            logprobs = torch.nn.functional.log_softmax(x, dim=-1)
-
-            nll_loss = -logprobs * target
-            nll_loss = nll_loss.sum(-1)
-
-            smooth_loss = -logprobs.mean(dim=-1)
-
-            loss = self.confidence * nll_loss + self.smoothing * smooth_loss
-
-            return loss.mean()
-        else:
-            return torch.nn.functional.cross_entropy(x, target)
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, logits=False, reduce=True):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.logits = logits
-        self.reduce = reduce
-
-    def forward(self, inputs, targets):
-        if self.logits:
-            BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        else:
-            BCE_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
-
-        pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-
-        if self.reduce:
-            return torch.mean(F_loss)
-        else:
-            return F_loss
 
 
 def seed_everything(seed: int):
@@ -127,7 +83,6 @@ class TrainProcess(object):
 
     def init_settings(self):
         """ initialization of data and model variables """
-        self.criterion = FocalLoss(alpha=hyp['alpha'], gamma=hyp['gamma'], logits=True).to(device)
 
         # load nn model
         config = get_efficientdet_config('tf_efficientdet_d5')
@@ -155,7 +110,7 @@ class TrainProcess(object):
                 self.model.load_state_dict(new_state_dict)
 
     def make_predictions(self, images, score_threshold=0.22):
-        images = torch.stack(images).cuda().float()
+        # images = torch.stack(images).cuda().float()
         predictions = []
         with torch.no_grad():
             det = self.model(images, torch.tensor([1] * images.shape[0]).float().cuda())
@@ -280,6 +235,7 @@ class TrainProcess(object):
 
         # create CV folds for split
         marking = pd.read_csv('input/global-wheat-detection/train.csv')
+        marking = marking.sample(100, replace=False)
 
         bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
         for i, column in enumerate(['x', 'y', 'w', 'h']):
@@ -447,9 +403,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='')
     parser.add_argument('--model', default='efficientnet-b0', type=str, help='Model version')
     parser.add_argument('--cuda', action='store_true', help='Use cuda to train model')
-    parser.add_argument('--hyp_params', type=str, default='cfg/default_train.json', help='hyper params file path')
+    parser.add_argument('--hyp_params', type=str, default='cfg/hyp_train.json', help='hyper params file path')
     parser.add_argument('--use_neptune_log', action='store_true', help='Use neptune.ai as a logger')
-    parser.add_argument('--neptune_params', type=str, default='cfg/default_neptune.json',
+    parser.add_argument('--neptune_params', type=str, default='cfg/neptune_settings.json',
                         help='neptune params file path')
     parser.add_argument('--results_name', type=str, default='results.txt', help='text logging file name in output/')
     parser.add_argument('--weights', type=str, default='', help='initial weights path')
@@ -459,15 +415,16 @@ if __name__ == '__main__':
 
     wdir = 'output/weights/'  # weights dir
 
-    if not os.path.isdir(wdir):
+    if not os.path.isdir('output'):
         os.mkdir('output')
+    elif not os.path.isdir(wdir):
         os.mkdir(wdir)
 
     results_file = f"output/{args.results_name}"
     results = open(results_file, "w")
     results.close()
 
-    device = torch.device('cuda' if args.cuda else 'cpu')
+    device = torch.device('cuda' if not args.cuda else 'cpu')
 
     with open(args.hyp_params) as json_file:
         hyp = json.load(json_file)
@@ -493,6 +450,8 @@ if __name__ == '__main__':
                                                )
 
         nep_id = experiment.id  # uniq ID token from neptune
+    else:
+        nep_id = -1
 
     seed_everything(62522)
 
