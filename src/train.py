@@ -6,7 +6,7 @@ sys.path.insert(0, "weightedboxesfusion")
 from src.data import DatasetRetriever
 from src.utils import calculate_image_precision
 
-from timm_effdet.effdet import get_efficientdet_config, EfficientDet, DetBenchTrain
+from timm_effdet.effdet import get_efficientdet_config, EfficientDet, DetBenchTrain, DetBenchMulty
 from timm_effdet.effdet.efficientdet import HeadNet
 from weightedboxesfusion.ensemble_boxes import *
 
@@ -139,7 +139,7 @@ class TrainProcess(object):
     def val_step(self, epoch):
         """ Validation step """
         # Service variables
-        validation_image_precisions = []
+        # validation_image_precisions = []
         iou_thresholds = [x for x in np.arange(0.4, 0.76, 0.05)]
 
         self.model.eval()
@@ -159,21 +159,21 @@ class TrainProcess(object):
                 # Scale loss by nominal batch_size
                 loss /= hyp['accumulate']
 
-                predictions = self.make_predictions(images)
-                for i, image in enumerate(images):
-                    boxes, scores, labels = self.run_wbf(predictions, image_index=i)
-                    boxes = boxes.astype(np.int32).clip(min=0, max=1023)
-
-                    preds = boxes
-                    preds_sorted_idx = np.argsort(scores)[::-1]
-                    preds_sorted = preds[preds_sorted_idx]
-                    gt_boxes = targets[i]['boxes'].cpu().numpy().astype(np.int32)
-                    image_precision = calculate_image_precision(preds_sorted,
-                                                                gt_boxes,
-                                                                thresholds=iou_thresholds,
-                                                                form='coco')
-
-                    validation_image_precisions.append(image_precision)
+                # predictions = self.make_predictions(images)
+                # for i, image in enumerate(images):
+                #     boxes, scores, labels = self.run_wbf(predictions, image_index=i)
+                #     boxes = boxes.astype(np.int32).clip(min=0, max=1023)
+                #
+                #     preds = boxes
+                #     preds_sorted_idx = np.argsort(scores)[::-1]
+                #     preds_sorted = preds[preds_sorted_idx]
+                #     gt_boxes = targets[i]['boxes'].cpu().numpy().astype(np.int32)
+                #     image_precision = calculate_image_precision(preds_sorted,
+                #                                                 gt_boxes,
+                #                                                 thresholds=iou_thresholds,
+                #                                                 form='coco')
+                #
+                #     validation_image_precisions.append(image_precision)
 
             # Print batch results
             mloss = (mloss * step + loss.item() * hyp['accumulate']) / (step + 1)  # update mean losses
@@ -181,7 +181,8 @@ class TrainProcess(object):
             s = ('%10s' * 2 + '%10.3g' * 1) % ('%g/%g' % (epoch, hyp['epochs'] - 1), mem, mloss)
             pbar.set_description(s)
 
-        val_iou = np.mean(validation_image_precisions)
+        # val_iou = np.mean(validation_image_precisions)
+        val_iou = 0
         return mloss, val_iou
 
     def train_step(self, epoch):
@@ -235,7 +236,7 @@ class TrainProcess(object):
 
         # create CV folds for split
         marking = pd.read_csv('input/global-wheat-detection/train.csv')
-        marking = marking.sample(100, replace=False)
+        marking = marking.sample(500, replace=False)
 
         bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
         for i, column in enumerate(['x', 'y', 'w', 'h']):
@@ -293,8 +294,11 @@ class TrainProcess(object):
                 collate_fn=collate_fn,
             )
 
+            self.val_loader = self.train_loader
+
             num_snapshot = 0  # current shot
             best_acc = 0  # current best accuracy metric
+            best_loss = 100.
 
             # init optimizer for current fold
             self.optimizer = torch.optim.SGD(self.model.parameters(),
@@ -335,7 +339,6 @@ class TrainProcess(object):
                 loss_train = self.train_step(epoch)
 
                 loss_val, acc_val = self.val_step(epoch)
-                acc, qwk = acc_val
 
                 self.lr_scheduler.step(epoch)  # for CosineAnnealingLR
 
@@ -348,15 +351,14 @@ class TrainProcess(object):
                     neptune.log_metric('lr', epoch, self.optimizer.param_groups[0]["lr"])
                     neptune.log_metric('train mean_loss', epoch, loss_train)
                     neptune.log_metric('val mean_loss', epoch, loss_val)
-                    neptune.log_metric('val acc', epoch, acc)
-                    neptune.log_metric('val cohen score', epoch, qwk)
+                    neptune.log_metric('val acc', epoch, acc_val)
 
                 # scheduler checkpoint
                 fine_tune = 'scratch'
                 if args.data_id:
                     fine_tune = f'tune{args.data_id}'
                 wbest = wdir + f'{args.model}CL_best_{nep_id}_{fine_tune}.pth'
-                if qwk >= best_acc:
+                if loss_val <= best_loss:
                     torch.save({
                         'name': args.model,
                         'epoch': epoch,
@@ -366,7 +368,7 @@ class TrainProcess(object):
                         'model_state_dict': self.model.state_dict(),
                         'optimizer_state_dict': self.optimizer.state_dict()
                     }, wbest)
-                    best_acc = qwk
+                    best_loss = loss_val
 
                 # save current snapshot and restart params
                 if (epoch + 1) == scheduler_step:
