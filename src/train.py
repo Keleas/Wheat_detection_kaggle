@@ -1,36 +1,34 @@
 import sys
-sys.path.insert(0, "src")
 sys.path.insert(0, "timm_effdet")
 sys.path.insert(0, "weightedboxesfusion")
+sys.path.insert(0, "src")
+print(sys.path)
 
-from src.data import DatasetRetriever
-from src.utils import calculate_image_precision
+from data import DatasetRetriever
+from utils import calculate_image_precision
 
-from timm_effdet.effdet import get_efficientdet_config, EfficientDet, DetBenchTrain, DetBenchMulty
-from timm_effdet.effdet.efficientdet import HeadNet
-from weightedboxesfusion.ensemble_boxes import *
+from effdet import get_efficientdet_config, EfficientDet, DetBenchTrain, DetBenchMulty
+from effdet.efficientdet import HeadNet
+from ensemble_boxes import *
 
-import argparse
+import os
 import gc
 import json
-import os
 import random
-
 import neptune
+import argparse
 import numpy as np
 import pandas as pd
-import torch
-from sklearn.model_selection import StratifiedKFold
-from torch import nn
-from torch.nn import functional as F
-from torch.utils.data import DataLoader
-from torch.utils.data.sampler import SequentialSampler, RandomSampler
 from tqdm import tqdm
 
+import torch
+from torch.utils.data import DataLoader
+from torch.utils.data.sampler import SequentialSampler, RandomSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from sklearn.model_selection import StratifiedKFold
 
 
-
-mixed_precision = False
+mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
     from apex import amp
 except:
@@ -127,7 +125,8 @@ class TrainProcess(object):
                 })
         return [predictions]
 
-    def run_wbf(self, predictions, image_index, image_size=512, iou_thr=0.44, skip_box_thr=0.43, weights=None):
+    @staticmethod
+    def run_wbf(predictions, image_index, image_size=512, iou_thr=0.44, skip_box_thr=0.43, weights=None):
         boxes = [(prediction[image_index]['boxes'] / (image_size - 1)).tolist() for prediction in predictions]
         scores = [prediction[image_index]['scores'].tolist() for prediction in predictions]
         labels = [np.ones(prediction[image_index]['scores'].shape[0]).tolist() for prediction in predictions]
@@ -303,9 +302,10 @@ class TrainProcess(object):
 
             # init optimizer for current fold
             self.optimizer = torch.optim.AdamW(self.model.parameters(),
-                                             lr=hyp['max_lr'],
-                                             # momentum=hyp['momentum'],
-                                             weight_decay=hyp['weight_decay'])
+                                               lr=hyp['max_lr'],
+                                               # momentum=hyp['momentum'],
+                                               weight_decay=hyp['weight_decay'],
+                                               eps=1e-7)
 
             # self.optimizer = torch.optim.Adam([{'params': self.model.model.parameters(),},
             #                                    {'params': self.model.head.parameters(),
@@ -329,11 +329,14 @@ class TrainProcess(object):
 
             if torch.cuda.device_count() > 1:
                 print("Let's use", torch.cuda.device_count(), "GPUs!")
-                self.model = nn.DataParallel(self.model)
+                self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+                self.model = DDP(self.model)
+                # self.model = nn.DataParallel(self.model)
             self.model.to(device)  # set device
 
             if mixed_precision:
-                self.model, self.optimizer = amp.initialize(self.model, self.optimizer, opt_level='O1', verbosity=0)
+                self.model, self.optimizer = amp.initialize(self.model, self.optimizer,
+                                                            opt_level='O1', verbosity=0)
 
             # run main tran loop on fold
             for epoch in range(hyp['epochs']):
@@ -416,6 +419,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    print(torch.ops.torchvision.nms)
+
     wdir = 'output/weights/'  # weights dir
 
     if not os.path.isdir('output'):
@@ -427,7 +432,7 @@ if __name__ == '__main__':
     results = open(results_file, "w")
     results.close()
 
-    device = torch.device('cuda' if not args.cuda else 'cpu')
+    device = torch.device('cuda' if args.cuda else 'cpu')
 
     with open(args.hyp_params) as json_file:
         hyp = json.load(json_file)

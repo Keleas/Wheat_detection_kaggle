@@ -13,16 +13,30 @@ def get_train_transforms():
         [
             A.RandomSizedCrop(min_max_height=(800, 800), height=1024, width=1024, p=0.5),
             A.OneOf([
-                A.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2,
-                                     val_shift_limit=0.2, p=0.9),
+                A.MotionBlur(),
+                A.GaussNoise(var_limit=(0, 0.1)),
+            ], p=0.7),
+            A.OneOf([
+                A.Transpose(),
+                A.RandomRotate90(),
+                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1,
+                                   rotate_limit=45,
+                                   border_mode=cv2.BORDER_CONSTANT, value=0),
+                A.NoOp()
+            ], p=0.8),
+            A.OneOf([
                 A.RandomBrightnessContrast(brightness_limit=0.2,
-                                           contrast_limit=0.2, p=0.9),
-            ], p=0.9),
+                                           contrast_limit=0.2, p=0.8),
+                A.RandomGamma(gamma_limit=(70, 130)),
+                A.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2,
+                                     val_shift_limit=0.2, p=0.6),
+                A.NoOp()
+            ], p=0.8),
             A.ToGray(p=0.01),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.Resize(height=512, width=512, p=1),
-            A.Cutout(num_holes=8, max_h_size=64, max_w_size=64, fill_value=0, p=0.5),
+            A.Cutout(num_holes=12, max_h_size=32, max_w_size=32, fill_value=0, p=0.5),
             ToTensorV2(p=1.0),
         ],
         p=1.0,
