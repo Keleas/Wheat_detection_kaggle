@@ -69,12 +69,16 @@ class DatasetRetriever(Dataset):
     def __getitem__(self, index: int):
         image_id = self.image_ids[index]
 
-        image, boxes = self.load_image_and_boxes(index)
+        # image, boxes = self.load_cutmix_image_and_boxes(index)
+        # image, boxes = self.load_image_and_boxes(index)
+        # image, boxes = self.load_mixup1_image_and_boxes(index)
 
-        # if self.test or random.random() > 0.5:
-        #     image, boxes = self.load_image_and_boxes(index)
-        # else:
-        #     image, boxes = self.load_cutmix_image_and_boxes(index)
+        if self.test or random.random() > 0.5:
+            image, boxes = self.load_image_and_boxes(index)
+        elif random.random() > 0.5:
+            image, boxes = self.load_cutmix_image_and_boxes(index)
+        else:
+            image, boxes = self.load_mixup1_image_and_boxes(index)
 
         # there is only one class
         labels = torch.ones((boxes.shape[0],), dtype=torch.int64)
@@ -159,12 +163,20 @@ class DatasetRetriever(Dataset):
             np.where((result_boxes[:, 2] - result_boxes[:, 0]) * (result_boxes[:, 3] - result_boxes[:, 1]) > 0)]
         return result_image, result_boxes
 
+    def load_mixup1_image_and_boxes(self, index):
+        image, boxes = self.load_image_and_boxes(index)
+        r_image, r_boxes = self.load_image_and_boxes(random.randint(0, self.image_ids.shape[0] - 1))
+
+        mixup_image = (image + r_image) / 2
+        mixup_boxes = np.vstack([boxes, r_boxes])
+
+        return mixup_image, mixup_boxes
+
 
 if __name__ == '__main__':
     import pandas as pd
 
     marking = pd.read_csv('input/global-wheat-detection/train.csv')
-    marking = marking.sample(100, replace=False)
 
     bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
     for i, column in enumerate(['x', 'y', 'w', 'h']):
@@ -188,20 +200,22 @@ if __name__ == '__main__':
         test=False,
     )
 
-    image, target, image_id = train_database[55]
-    boxes = target['boxes'].cpu().numpy().astype(np.int32)
+    for _ in range(10):
+        item = random.randint(0, train_database.image_ids.shape[0] - 1)
+        image, target, image_id = train_database[item]
+        boxes = target['boxes'].cpu().numpy().astype(np.int32)
 
-    numpy_image = image.permute(1, 2, 0).cpu().numpy()
+        numpy_image = image.permute(1, 2, 0).cpu().numpy()
 
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(1, 1, figsize=(16, 8))
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(1, 1, figsize=(16, 8))
 
-    for box in boxes:
-        cv2.rectangle(numpy_image, (box[1], box[0]), (box[3], box[2]), (0, 1, 0), 2)
+        for box in boxes:
+            cv2.rectangle(numpy_image, (box[1], box[0]), (box[3], box[2]), (0, 1, 0), 2)
 
-    ax.set_axis_off()
-    ax.imshow(numpy_image)
-    plt.show()
+        ax.set_axis_off()
+        ax.imshow(numpy_image)
+        plt.show()
 
     # def collate_fn(batch):
     #     return tuple(zip(*batch))

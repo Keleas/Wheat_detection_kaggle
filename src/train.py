@@ -92,7 +92,7 @@ class TrainProcess(object):
         config.num_classes = 1
         config.image_size = 512
         net.class_net = HeadNet(config, num_outputs=config.num_classes, norm_kwargs=dict(eps=.001, momentum=.01))
-        self.model = DetBenchTrain(net, config)
+        self.model = DetBenchMulty(net, config)
 
         if args.weights:  # load prev weight and continue train process
             checkpoint = torch.load(os.path.join(wdir, args.weights))
@@ -139,13 +139,13 @@ class TrainProcess(object):
     def val_step(self, epoch):
         """ Validation step """
         # Service variables
-        # validation_image_precisions = []
-        iou_thresholds = [x for x in np.arange(0.4, 0.76, 0.05)]
+        iou_thresholds = [x for x in np.arange(0.5, 0.76, 0.05)]
 
         self.model.eval()
         pbar = tqdm(enumerate(self.val_loader), total=len(self.val_loader), ascii=True, desc='validation')
         mloss = torch.zeros(1).to(device)  # mean losses
-        print(('\n' + '%10s' * 3) % ('Epoch', 'gpu_mem', 'total'))
+        macc = 0.
+        print(('\n' + '%10s' * 4) % ('Epoch', 'gpu_mem', 'loss', 'acc'))
         for step, (images, targets, image_ids) in pbar:
             images = torch.stack(images)
             images = images.to(device).float()
@@ -159,31 +159,33 @@ class TrainProcess(object):
                 # Scale loss by nominal batch_size
                 loss /= hyp['accumulate']
 
-                # predictions = self.make_predictions(images)
-                # for i, image in enumerate(images):
-                #     boxes, scores, labels = self.run_wbf(predictions, image_index=i)
-                #     boxes = boxes.astype(np.int32).clip(min=0, max=1023)
-                #
-                #     preds = boxes
-                #     preds_sorted_idx = np.argsort(scores)[::-1]
-                #     preds_sorted = preds[preds_sorted_idx]
-                #     gt_boxes = targets[i]['boxes'].cpu().numpy().astype(np.int32)
-                #     image_precision = calculate_image_precision(preds_sorted,
-                #                                                 gt_boxes,
-                #                                                 thresholds=iou_thresholds,
-                #                                                 form='coco')
-                #
-                #     validation_image_precisions.append(image_precision)
+                validation_image_precisions = []
+                predictions = self.make_predictions(images)
+                for i, image in enumerate(images):
+                    boxes, scores, labels = self.run_wbf(predictions, image_index=i)
+                    boxes = boxes.astype(np.int32).clip(min=0, max=1023)
+
+                    preds = boxes
+                    preds_sorted_idx = np.argsort(scores)[::-1]
+                    preds_sorted = preds[preds_sorted_idx]
+                    gt_boxes = targets[i]['boxes'].cpu().numpy().astype(np.int32)
+                    image_precision = calculate_image_precision(preds_sorted,
+                                                                gt_boxes,
+                                                                thresholds=iou_thresholds,
+                                                                form='coco')
+
+                    validation_image_precisions.append(image_precision)
 
             # Print batch results
             mloss = (mloss * step + loss.item() * hyp['accumulate']) / (step + 1)  # update mean losses
+            macc = (macc * step + np.mean(validation_image_precisions)) / (step + 1)  # update mean losses
             mem = '%.3gG' % (torch.cuda.memory_cached() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-            s = ('%10s' * 2 + '%10.3g' * 1) % ('%g/%g' % (epoch, hyp['epochs'] - 1), mem, mloss)
+            s = ('%10s' * 2 + '%10.3g' * 2) % ('%g/%g' % (epoch, hyp['epochs'] - 1), mem, mloss, macc)
             pbar.set_description(s)
 
         # val_iou = np.mean(validation_image_precisions)
-        val_iou = 0
-        return mloss, val_iou
+        # val_iou = 0
+        return mloss, macc
 
     def train_step(self, epoch):
         """ Training step """
@@ -236,7 +238,6 @@ class TrainProcess(object):
 
         # create CV folds for split
         marking = pd.read_csv('input/global-wheat-detection/train.csv')
-        marking = marking.sample(500, replace=False)
 
         bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
         for i, column in enumerate(['x', 'y', 'w', 'h']):
@@ -301,9 +302,9 @@ class TrainProcess(object):
             best_loss = 100.
 
             # init optimizer for current fold
-            self.optimizer = torch.optim.SGD(self.model.parameters(),
+            self.optimizer = torch.optim.AdamW(self.model.parameters(),
                                              lr=hyp['max_lr'],
-                                             momentum=hyp['momentum'],
+                                             # momentum=hyp['momentum'],
                                              weight_decay=hyp['weight_decay'])
 
             # self.optimizer = torch.optim.Adam([{'params': self.model.model.parameters(),},
@@ -349,15 +350,15 @@ class TrainProcess(object):
 
                 if args.use_neptune_log:
                     neptune.log_metric('lr', epoch, self.optimizer.param_groups[0]["lr"])
-                    neptune.log_metric('train mean_loss', epoch, loss_train)
-                    neptune.log_metric('val mean_loss', epoch, loss_val)
+                    neptune.log_metric('train loss', epoch, loss_train)
+                    neptune.log_metric('val loss', epoch, loss_val)
                     neptune.log_metric('val acc', epoch, acc_val)
 
                 # scheduler checkpoint
                 fine_tune = 'scratch'
                 if args.data_id:
                     fine_tune = f'tune{args.data_id}'
-                wbest = wdir + f'{args.model}CL_best_{nep_id}_{fine_tune}.pth'
+                wbest = wdir + f'{args.model}CL_best_{nep_id}_f{fold}_{fine_tune}.pth'
                 if loss_val <= best_loss:
                     torch.save({
                         'name': args.model,
