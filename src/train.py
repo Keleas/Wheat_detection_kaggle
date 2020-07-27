@@ -138,7 +138,7 @@ class TrainProcess(object):
     def val_step(self, epoch):
         """ Validation step """
         # Service variables
-        iou_thresholds = [x for x in np.arange(0.5, 0.76, 0.05)]
+        iou_thresholds = [x for x in np.arange(0.3, 0.66, 0.05)]
 
         self.model.eval()
         pbar = tqdm(enumerate(self.val_loader), total=len(self.val_loader), ascii=True, desc='validation')
